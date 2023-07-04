@@ -11,10 +11,20 @@ http://nlp.seas.harvard.edu/annotated-transformer/
 
 # Package Dependencies
 
+Refer to [CUDA install instruction](https://linux.how2shout.com/how-to-install-cuda-on-ubuntu-20-04-lts-linux/) if CUDA is not installed.
+
+The python script has been tested using python 3.8. You are recommended to use [conda](https://conda.io/projects/conda/en/latest/index.html) to manage multiple python enviorement on the same host.
+
 Use `requirements.txt` to install library dependencies with pip:
 
 ```
 pip install -r requirements.txt
+```
+
+For slow pip download speed, better to install torch using conda first before running above command:
+
+```
+conda install pytorch==1.11.0 torchvision==0.12.0 torchaudio==0.11.0 cudatoolkit=11.3 -c pytorch
 ```
 
 
