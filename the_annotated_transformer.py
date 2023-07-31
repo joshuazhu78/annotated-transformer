@@ -15,7 +15,7 @@
 # ---
 # %% [markdown] id="SX7UC-8jTsp7" tags=[]
 #
-# <center><h1>The Annotated Transformer</h1> </center>
+# <center><h1>The Annotated Transformer for 6G</h1> </center>
 #
 #
 # <center>
@@ -27,21 +27,25 @@
 #
 # * *v2022: Austin Huang, Suraj Subramanian, Jonathan Sum, Khalid Almubarak,
 #    and Stella Biderman.*
+# * *v2023: Yuan Zhu*
 # * *[Original](https://nlp.seas.harvard.edu/2018/04/03/attention.html):
 #    [Sasha Rush](http://rush-nlp.com/).*
 #
 #
 # The Transformer has been on a lot of
-# people's minds over the last <s>year</s> five years.
-# This post presents an annotated version of the paper in the
+# people's minds over the last <s>five</s> six years.
+# The [original post](http://nlp.seas.harvard.edu/annotated-transformer/)
+# presents an annotated version of the paper in the
 # form of a line-by-line implementation. It reorders and deletes
 # some sections from the original paper and adds comments
+# throughout. This post modified the transformer to be used
+# in wireless communications CSI (channel state information) compression
+# and add comments
 # throughout. This document itself is a working notebook, and should
 # be a completely usable implementation.
 # Code is available
-# [here](https://github.com/harvardnlp/annotated-transformer/).
+# [here](https://github.com/joshuazhu78/annotated-transformer/).
 #
-
 
 # %% [markdown] id="RSntDwKhTsp-"
 # <h3> Table of Contents </h3>
@@ -84,7 +88,6 @@
 # <li><a href="#attention-visualization">Attention Visualization</a></li>
 # <li><a href="#encoder-self-attention">Encoder Self Attention</a></li>
 # <li><a href="#decoder-self-attention">Decoder Self Attention</a></li>
-# <li><a href="#decoder-src-attention">Decoder Src Attention</a></li>
 # </ul></li>
 # <li><a href="#conclusion">Conclusion</a></li>
 # </ul>
@@ -101,7 +104,6 @@
 # %% id="NwClcbH6Tsp8"
 # # Uncomment for colab
 # #
-# # !pip install -q torchdata==0.3.0 torchtext==0.12 spacy==3.2 altair GPUtil
 # # !python -m spacy download de_core_news_sm
 # # !python -m spacy download en_core_web_sm
 
@@ -111,10 +113,11 @@ import os
 from os.path import exists
 import torch
 import torch.nn as nn
-from torch.nn.functional import log_softmax, pad
+from torch.nn.functional import log_softmax, pad, normalize
 import math
 import copy
 import time
+import numpy as np
 from torch.optim.lr_scheduler import LambdaLR
 import pandas as pd
 import altair as alt
@@ -129,6 +132,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
+from EigenVecDataset import EigenVecDataset
 
 
 # Set to False to skip notebook execution (e.g. for debugging)
@@ -206,6 +210,10 @@ class DummyScheduler:
 # transduction model relying entirely on self-attention to compute
 # representations of its input and output without using sequence
 # aligned RNNs or convolution.
+#
+# For channel state infomation (CSI) compression task, self-attention
+# mechanism is used to explore the channel correlation over frequency
+# and time (which are positions in sequantial computation)
 
 # %% [markdown]
 # # Part 1: Model Architecture
@@ -225,6 +233,14 @@ class DummyScheduler:
 # step the model is auto-regressive
 # [(cite)](https://arxiv.org/abs/1308.0850), consuming the previously
 # generated symbols as additional input when generating the next.
+#
+# For CSI compression task that exploits the spatial and frequency correlations, we
+# modify the encoder structure by concatenating all encoded vectors $(z_1, ..., z_n)$
+# and compress it using a linear block and further passes a non-trainable
+# quantizer to CSI bits feedback to the CSI decoder. And at the CSI decoder
+# we remove the auto-regressive source attention and feeds all CSI bits in
+# one shot to recover the encoded vector $(z_1, ..., z_n)$ to feed into
+# the stacked self-attention and feed forward blocks to recover the CSI.
 
 # %% id="k0XGXhzRTsqB"
 class EncoderDecoder(nn.Module):
@@ -233,36 +249,25 @@ class EncoderDecoder(nn.Module):
     other models.
     """
 
-    def __init__(self, encoder, decoder, src_embed, tgt_embed, generator):
+    def __init__(self, encoder, decoder, src_embed, tgt_embed, src_postprocessor, tgt_preprocessor, tgt_postprocessor):
         super(EncoderDecoder, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.src_embed = src_embed
         self.tgt_embed = tgt_embed
-        self.generator = generator
+        self.src_postprocessor = src_postprocessor
+        self.tgt_preprocessor = tgt_preprocessor
+        self.tgt_postprocessor = tgt_postprocessor
 
-    def forward(self, src, tgt, src_mask, tgt_mask):
-        "Take in and process masked src and target sequences."
-        return self.decode(self.encode(src, src_mask), src_mask, tgt, tgt_mask)
+    def forward(self, src, src_mask):
+        "Take in and process src sequences."
+        return self.decode(self.encode(src, src_mask), src_mask)
 
     def encode(self, src, src_mask):
-        return self.encoder(self.src_embed(src), src_mask)
+        return self.src_postprocessor(self.encoder(self.src_embed(src), src_mask))
 
-    def decode(self, memory, src_mask, tgt, tgt_mask):
-        return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
-
-
-# %% id="NKGoH2RsTsqC"
-class Generator(nn.Module):
-    "Define standard linear + softmax generation step."
-
-    def __init__(self, d_model, vocab):
-        super(Generator, self).__init__()
-        self.proj = nn.Linear(d_model, vocab)
-
-    def forward(self, x):
-        return log_softmax(self.proj(x), dim=-1)
-
+    def decode(self, memory, src_mask):
+        return self.tgt_postprocessor(self.decoder(self.tgt_embed(self.tgt_preprocessor(memory)), src_mask))
 
 # %% [markdown] id="mOoEnF_jTsqC"
 #
@@ -272,8 +277,7 @@ class Generator(nn.Module):
 # respectively.
 
 # %% [markdown] id="oredWloYTsqC"
-# ![](images/ModalNet-21.png)
-
+# ![](images/Transformer-CSI.png)
 
 # %% [markdown] id="bh092NZBTsqD"
 # ## Encoder and Decoder Stacks
@@ -303,6 +307,29 @@ class Encoder(nn.Module):
             x = layer(x, mask)
         return self.norm(x)
 
+# %% [markdown] id="bh076NZBTsqD"
+#
+# The encoder post processor is collecting output from all positions and
+# compress it using a linear block. And further layer normalize the output
+# and quantize the output into CSI bits.
+
+# %% id="xaVTq9MvTsqD"
+class EncoderPostprocessor(nn.Module):
+    "EncoderPreprocessor is post process to generate CSI bits."
+
+    def __init__(self, ns, d_model, nt_compressed):
+        super(EncoderPostprocessor, self).__init__()
+        self.flatten = nn.Flatten()
+        self.linear = nn.Linear(ns*d_model, nt_compressed)
+        self.norm = LayerNorm(nt_compressed)
+        self.quant = torch.ao.quantization.QuantStub()
+
+    def forward(self, x):
+        "Pass the input through each layer in turn."
+        x = self.flatten(x)
+        x = self.linear(x)
+        x = self.norm(x)
+        return self.quant(x)
 
 # %% [markdown] id="GjAKgjGwTsqD"
 #
@@ -408,6 +435,9 @@ class Decoder(nn.Module):
 # the output of the encoder stack.  Similar to the encoder, we employ
 # residual connections around each of the sub-layers, followed by
 # layer normalization.
+# For CSI compression task, the source attention layer is not needed.
+# As such, the EncoderLayer is used as basic building block for the decoder
+# too.
 
 # %% id="M2hA1xFQTsqF"
 class DecoderLayer(nn.Module):
@@ -428,6 +458,51 @@ class DecoderLayer(nn.Module):
         x = self.sublayer[1](x, lambda x: self.src_attn(x, m, m, src_mask))
         return self.sublayer[2](x, self.feed_forward)
 
+# %% [markdown] id="dXlCC22pTsqF"
+#
+# The decoder pre-processor firstly dequantize the CSI bits from the encoder.
+# Then it reshapes the outcome to ns positions before passing to the decoder
+# embedding.
+
+# %% id="M2hA2xFQQsqF"
+class DecoderPreprocessor(nn.Module):
+    "DecoderPreprocessor is the preprocessor for the decoder"
+
+    def __init__(self, ns, nt_compressed):
+        super(DecoderPreprocessor, self).__init__()
+        self.dequant = torch.ao.quantization.DeQuantStub()
+        self.ns = ns
+        self.nt_compressed = nt_compressed
+
+    def forward(self, x):
+        "Pass the input through each layer in turn."
+        x = self.dequant(x)
+        return torch.reshape(x, (x.size(dim=0), self.ns, int(self.nt_compressed/self.ns)))
+
+# %% [markdown] id="M1hA1xFQQsqE"
+#
+# The decoder postprocessor firstly compress the transformer output to
+# the original CSI size and then normalize each complex eigen vector.
+
+# %% id="M2hA2xFQQsqE"
+class DecoderPostprocessor(nn.Module):
+    "DecoderPostprocessor is post process to generate eigen beam."
+
+    def __init__(self, d_model, nt):
+        super(DecoderPostprocessor, self).__init__()
+        self.linear = nn.Linear(d_model, nt * 2)
+
+    def forward(self, x):
+        "Pass the input through each layer in turn."
+        x = self.linear(x)
+        shape_ = x.shape
+        nt = int(shape_[-1] / 2)
+        x = x.view(-1, shape_[-1])
+        x = torch.complex(x[:,np.arange(0, nt*2, 2)], x[:,np.arange(1, nt*2, 2)])
+        x = normalize(x)
+        x = torch.cat((torch.real(x), torch.imag(x)), dim=1)
+        x = torch.reshape(x, shape_)
+        return x
 
 # %% [markdown] id="FZz5rLl4TsqF"
 #
@@ -637,7 +712,9 @@ class MultiHeadedAttention(nn.Module):
 # output of the encoder.  This allows every position in the decoder to
 # attend over all positions in the input sequence.  This mimics the
 # typical encoder-decoder attention mechanisms in sequence-to-sequence
-# models such as [(cite)](https://arxiv.org/abs/1609.08144).
+# models such as [(cite)](https://arxiv.org/abs/1609.08144). For CSI
+# compression task as the encoder post processor feeds all output from
+# encoder to the decoder, this is not needed.
 #
 #
 # 2) The encoder contains self-attention layers.  In a self-attention
@@ -710,6 +787,18 @@ class Embeddings(nn.Module):
     def forward(self, x):
         return self.lut(x) * math.sqrt(self.d_model)
 
+# %% [markdown] id="dR1YM123TsqH"
+# for CSI compression task, we use linear embedding instead of lookup
+# table based embedding.
+#
+# %% id="pyrChq9qTsqI"
+class LinearEmbeddings(nn.Module):
+    def __init__(self, d_model, d_in):
+        super(LinearEmbeddings, self).__init__()
+        self.linear = nn.Linear(d_in, d_model)
+
+    def forward(self, x):
+        return self.linear(x)
 
 # %% [markdown] id="vOkdui-cTsqH"
 # ## Positional Encoding
@@ -816,23 +905,30 @@ show_example(example_positional)
 # %% [markdown] id="iwNKCzlyTsqI"
 # ## Full Model
 #
-# > Here we define a function from hyperparameters to a full model.
+# > Here we define a function from hyperparameters to a full model. $n_{\text{s}}$
+# is number of subbands for the CSI. $n_{\text{t}}$ is number of antenna ports for
+# the CSI and $compressratio$ is simply defined as the ratio between number of
+# compressed CSI numbers over uncompressed numbers $2*n_{\text{t}}$. It can be seen
+# that decoder is identical to encoder for CSI compression task.
 
 # %% id="mPe1ES0UTsqI"
 def make_model(
-    src_vocab, tgt_vocab, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1
+    ns, nt, compress_ratio, N=6, d_model=512, d_ff=2048, h=8, dropout=0.1
 ):
     "Helper: Construct a model from hyperparameters."
+    nt_compressed = int(ns * nt * 2 * compress_ratio)
     c = copy.deepcopy
     attn = MultiHeadedAttention(h, d_model)
     ff = PositionwiseFeedForward(d_model, d_ff, dropout)
     position = PositionalEncoding(d_model, dropout)
     model = EncoderDecoder(
         Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
-        Decoder(DecoderLayer(d_model, c(attn), c(attn), c(ff), dropout), N),
-        nn.Sequential(Embeddings(d_model, src_vocab), c(position)),
-        nn.Sequential(Embeddings(d_model, tgt_vocab), c(position)),
-        Generator(d_model, tgt_vocab),
+        Encoder(EncoderLayer(d_model, c(attn), c(ff), dropout), N),
+        nn.Sequential(LinearEmbeddings(d_model, nt*2), c(position)),
+        nn.Sequential(LinearEmbeddings(d_model, int(nt_compressed/ns)), c(position)),
+        EncoderPostprocessor(ns, d_model, nt_compressed),
+        DecoderPreprocessor(ns, nt_compressed),
+        DecoderPostprocessor(d_model, nt),
     )
 
     # This was important from their code.
@@ -847,34 +943,27 @@ def make_model(
 # ## Inference:
 #
 # > Here we make a forward step to generate a prediction of the
-# model. We try to use our transformer to memorize the input. As you
+# model. We try to use our transformer to compress the input and
+# recover it. As you
 # will see the output is randomly generated due to the fact that the
 # model is not trained yet. In the next tutorial we will build the
-# training function and try to train our model to memorize the numbers
-# from 1 to 10.
+# training function and try to train our model to compress the CSI
+# from a system level simulator. We use MSELoss to quantify the
+# performance of a untrained model.
 
 # %%
 def inference_test():
-    test_model = make_model(11, 11, 2)
+    ns, nt, compress_ratio = 13, 32, 0.25
+    test_model = make_model(ns, nt, compress_ratio)
     test_model.eval()
-    src = torch.LongTensor([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
-    src_mask = torch.ones(1, 1, 10)
 
-    memory = test_model.encode(src, src_mask)
-    ys = torch.zeros(1, 1).type_as(src)
-
-    for i in range(9):
-        out = test_model.decode(
-            memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
-        )
-        prob = test_model.generator(out[:, -1])
-        _, next_word = torch.max(prob, dim=1)
-        next_word = next_word.data[0]
-        ys = torch.cat(
-            [ys, torch.empty(1, 1).type_as(src.data).fill_(next_word)], dim=1
-        )
-
-    print("Example Untrained Model Prediction:", ys)
+    loss = nn.MSELoss()
+    for i in range(1):
+        src = torch.randn((10, ns, nt*2))
+        src_mask = torch.ones(1, 1, ns)
+        out = test_model.forward(src, src_mask)
+        output = loss(out, src)
+        print(("MSE loss: %.4f") % output.item())
 
 
 def run_tests():
@@ -899,6 +988,8 @@ show_example(run_tests)
 # > needed to train a standard encoder decoder model. First we define a
 # > batch object that holds the src and target sentences for training,
 # > as well as constructing the masks.
+# > For CSI compression task, some of the pytorch existing modules can
+# > be reused.
 
 # %% [markdown] id="G7SkCenXTsqI"
 # ## Batches and Masking
@@ -955,24 +1046,26 @@ def run_epoch(
     mode="train",
     accum_iter=1,
     train_state=TrainState(),
+    device="cpu",
 ):
     """Train a single epoch"""
     start = time.time()
-    total_tokens = 0
+    #total_tokens = 0
     total_loss = 0
-    tokens = 0
+    #tokens = 0
     n_accum = 0
     for i, batch in enumerate(data_iter):
+        src_mask = torch.ones((1, 1, batch.shape[1]), device=device)
         out = model.forward(
-            batch.src, batch.tgt, batch.src_mask, batch.tgt_mask
+            batch, src_mask
         )
-        loss, loss_node = loss_compute(out, batch.tgt_y, batch.ntokens)
-        # loss_node = loss_node / accum_iter
+        loss = loss_compute(out, batch)
+        #loss_node = loss_node / accum_iter
         if mode == "train" or mode == "train+log":
-            loss_node.backward()
+            loss.backward()
             train_state.step += 1
-            train_state.samples += batch.src.shape[0]
-            train_state.tokens += batch.ntokens
+            train_state.samples += batch.shape[0]
+            #train_state.tokens += batch.ntokens
             if i % accum_iter == 0:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -981,23 +1074,23 @@ def run_epoch(
             scheduler.step()
 
         total_loss += loss
-        total_tokens += batch.ntokens
-        tokens += batch.ntokens
+        #total_tokens += batch.ntokens
+        #tokens += batch.ntokens
         if i % 40 == 1 and (mode == "train" or mode == "train+log"):
             lr = optimizer.param_groups[0]["lr"]
             elapsed = time.time() - start
             print(
                 (
-                    "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.2f "
-                    + "| Tokens / Sec: %7.1f | Learning Rate: %6.1e"
+                    "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.2e "
+                    + "| Samples / Sec: %7.1f | Learning Rate: %6.1e"
                 )
-                % (i, n_accum, loss / batch.ntokens, tokens / elapsed, lr)
+                % (i, n_accum, loss, train_state.samples / elapsed, lr)
             )
             start = time.time()
-            tokens = 0
+            #tokens = 0
         del loss
-        del loss_node
-    return total_loss / total_tokens, train_state
+        #del loss_node
+    return total_loss / (i + 1), train_state
 
 
 # %% [markdown] id="aB1IF0foTsqJ"
@@ -1014,6 +1107,12 @@ def run_epoch(
 # Sentence pairs were batched together by approximate sequence length.
 # Each training batch contained a set of sentence pairs containing
 # approximately 25000 source tokens and 25000 target tokens.
+#
+# For CSI compression task, we trained the model using CSI generated
+# from system level simulator. We use a 20MHz system with 13 subbands.
+# And for each subband, the simulator will svd the average channel
+# covariance matrix to compute the eigen beams. And those eigen beams
+# will be used to train the model.
 
 # %% [markdown] id="F1mTQatiTsqJ" jp-MarkdownHeadingCollapsed=true tags=[]
 # ## Hardware and Schedule
@@ -1024,6 +1123,9 @@ def run_epoch(
 # base models for a total of 100,000 steps or 12 hours. For our big
 # models, step time was 1.0 seconds.  The big models were trained for
 # 300,000 steps (3.5 days).
+#
+# For CSI compression tasks, the model can be trained using CPU if dataset
+# is not large.
 
 # %% [markdown] id="-utZeuGcTsqJ"
 # ## Optimizer
@@ -1136,6 +1238,8 @@ example_learning_schedule()
 # $\epsilon_{ls}=0.1$ [(cite)](https://arxiv.org/abs/1512.00567).
 # This hurts perplexity, as the model learns to be more unsure, but
 # improves accuracy and BLEU score.
+#
+# For CSI compression task, label smoothing is not needed.
 
 # %% [markdown] id="kNoAVD8bTsqK"
 #
@@ -1169,6 +1273,31 @@ class LabelSmoothing(nn.Module):
         self.true_dist = true_dist
         return self.criterion(x, true_dist.clone().detach())
 
+# %% [markdown] id="kkkAVD8bTsqK"
+#
+# > For CSI compression task, we implemented cosine similarity loss based on the mean
+# > SGCS between the input and decoded CSI.
+
+# %% id="ggU2GyiETsqK"
+class SGCSLoss(nn.Module):
+    def __init__(self):
+        super(SGCSLoss, self).__init__()
+
+    def forward(self, inputs, targets):
+        nt = int(inputs.shape[-1] / 2)
+        inputs_cmplx = torch.complex(inputs[:,:,np.arange(0, nt*2, 2)], inputs[:,:,np.arange(1, nt*2, 2)]).view(-1, nt)
+        targets_cmplx = torch.complex(targets[:,:,np.arange(0, nt*2, 2)], targets[:,:,np.arange(1, nt*2, 2)]).view(-1, nt)
+        res = torch.stack((inputs_cmplx, targets_cmplx), dim=1)
+        output = torch.tensor(0)
+        for i, x in enumerate(res):
+            input = x[0, :]
+            target = x[1, :]
+            xy = torch.abs(torch.dot(input, torch.conj(target)))
+            xx = torch.sqrt(torch.abs(torch.dot(input, torch.conj(input))))
+            yy = torch.sqrt(torch.abs(torch.dot(target, torch.conj(target))))
+            output = output + xy / xx / yy
+        output = output / res.shape[0]
+        return 1 - output
 
 # %% [markdown] id="jCxUrlUyTsqK"
 #
@@ -1467,10 +1596,10 @@ def load_vocab(spacy_de, spacy_en):
     return vocab_src, vocab_tgt
 
 
-if is_interactive_notebook():
-    # global variables used later in the script
-    spacy_de, spacy_en = show_example(load_tokenizers)
-    vocab_src, vocab_tgt = show_example(load_vocab, args=[spacy_de, spacy_en])
+#if is_interactive_notebook():
+#    # global variables used later in the script
+#    spacy_de, spacy_en = show_example(load_tokenizers)
+#    vocab_src, vocab_tgt = show_example(load_vocab, args=[spacy_de, spacy_en])
 
 
 # %% [markdown] id="-l-TFwzfTsqL"
@@ -1546,66 +1675,91 @@ def collate_batch(
     tgt = torch.stack(tgt_list)
     return (src, tgt)
 
+# %% [markdown] id="kNoAVD8bTqbc"
+#
+# > We implement a simple collator to just stack the CSI
+# > tensors from one batch.
+
+# %% id="shU2GjiETsqc"
+def collate_batch_(
+    batch,
+    device,
+):
+    src_list = []
+    for _src in batch:
+        src_list.append(torch.tensor(_src['ev'],
+                                      device=device,
+                                      ))
+    return torch.stack(src_list)
 
 # %% id="ka2Ce_WIokC_" tags=[]
 def create_dataloaders(
     device,
-    vocab_src,
-    vocab_tgt,
-    spacy_de,
-    spacy_en,
+    #vocab_src,
+    #vocab_tgt,
+    #spacy_de,
+    #spacy_en,
+    sls_config,
+    sls_path,
+    train_drops,
+    test_drops,
+    ev_idx,
     batch_size=12000,
-    max_padding=128,
-    is_distributed=True,
+    #max_padding=128,
+    #is_distributed=True,
 ):
     # def create_dataloaders(batch_size=12000):
-    def tokenize_de(text):
-        return tokenize(text, spacy_de)
+    #def tokenize_de(text):
+    #    return tokenize(text, spacy_de)
 
-    def tokenize_en(text):
-        return tokenize(text, spacy_en)
+    #def tokenize_en(text):
+    #    return tokenize(text, spacy_en)
 
     def collate_fn(batch):
-        return collate_batch(
+        return collate_batch_(
             batch,
-            tokenize_de,
-            tokenize_en,
-            vocab_src,
-            vocab_tgt,
+            #tokenize_de,
+            #tokenize_en,
+            #vocab_src,
+            #vocab_tgt,
             device,
-            max_padding=max_padding,
-            pad_id=vocab_src.get_stoi()["<blank>"],
+            #max_padding=max_padding,
+            #pad_id=vocab_src.get_stoi()["<blank>"],
         )
 
-    train_iter, valid_iter, test_iter = datasets.Multi30k(
-        language_pair=("de", "en")
-    )
+    #train_iter, valid_iter, test_iter = datasets.Multi30k(
+    #    language_pair=("de", "en")
+    #)
+    traindata = EigenVecDataset(sls_config, sls_path, train_drops, ev_idx)
+    validdata = EigenVecDataset(sls_config, sls_path, test_drops, ev_idx)
 
-    train_iter_map = to_map_style_dataset(
-        train_iter
-    )  # DistributedSampler needs a dataset len()
-    train_sampler = (
-        DistributedSampler(train_iter_map) if is_distributed else None
-    )
-    valid_iter_map = to_map_style_dataset(valid_iter)
-    valid_sampler = (
-        DistributedSampler(valid_iter_map) if is_distributed else None
-    )
+    #train_iter_map = to_map_style_dataset(
+    #    train_iter
+    #)  # DistributedSampler needs a dataset len()
+    #train_sampler = (
+    #    DistributedSampler(train_iter_map) if is_distributed else None
+    #)
+    #valid_iter_map = to_map_style_dataset(valid_iter)
+    #valid_sampler = (
+    #    DistributedSampler(valid_iter_map) if is_distributed else None
+    #)
 
     train_dataloader = DataLoader(
-        train_iter_map,
+        traindata,
         batch_size=batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
+        #shuffle=(train_sampler is None),
+        #sampler=train_sampler,
         collate_fn=collate_fn,
     )
     valid_dataloader = DataLoader(
-        valid_iter_map,
+        validdata,
         batch_size=batch_size,
-        shuffle=(valid_sampler is None),
-        sampler=valid_sampler,
+        #shuffle=(valid_sampler is None),
+        #sampler=valid_sampler,
         collate_fn=collate_fn,
     )
+    traindata.eigen_buffer.to(torch.device(device))
+    validdata.eigen_buffer.to(torch.device(device))
     return train_dataloader, valid_dataloader
 
 
@@ -1613,23 +1767,33 @@ def create_dataloaders(
 # ## Training the System
 
 # %%
+def final_model_name(config):
+    return "%s%d%.2f_final.pt" % (config["file_prefix"], config["nt"], config["compress_ratio"])
+
+# %%
 def train_worker(
     gpu,
     ngpus_per_node,
-    vocab_src,
-    vocab_tgt,
-    spacy_de,
-    spacy_en,
+    #vocab_src,
+    #vocab_tgt,
+    #spacy_de,
+    #spacy_en,
     config,
     is_distributed=False,
 ):
-    print(f"Train worker process using GPU: {gpu} for training", flush=True)
-    torch.cuda.set_device(gpu)
+    if gpu == "cpu":
+        print("Train worker process using CPU for training")
+    else:
+        print(f"Train worker process using GPU: {gpu} for training", flush=True)
+        torch.cuda.set_device(gpu)
 
-    pad_idx = vocab_tgt["<blank>"]
+    #pad_idx = vocab_tgt["<blank>"]
     d_model = 512
-    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.cuda(gpu)
+    ns, nt, compress_ratio = config["ns"], config["nt"], config["compress_ratio"]
+    model = make_model(ns, nt, compress_ratio, d_model=d_model)
+    model.float()
+    if gpu != "cpu":
+        model.cuda(gpu)
     module = model
     is_main_process = True
     if is_distributed:
@@ -1640,20 +1804,25 @@ def train_worker(
         module = model.module
         is_main_process = gpu == 0
 
-    criterion = LabelSmoothing(
-        size=len(vocab_tgt), padding_idx=pad_idx, smoothing=0.1
-    )
-    criterion.cuda(gpu)
+    #criterion = LabelSmoothing(
+    #    size=len(vocab_tgt), padding_idx=pad_idx, smoothing=0.1
+    #)
+    #criterion.cuda(gpu)
 
     train_dataloader, valid_dataloader = create_dataloaders(
         gpu,
-        vocab_src,
-        vocab_tgt,
-        spacy_de,
-        spacy_en,
+        #vocab_src,
+        #vocab_tgt,
+        #spacy_de,
+        #spacy_en,
+        sls_config=config["sls_config"],
+        sls_path=config["sls_path"],
+        train_drops=config["train_drops"],
+        test_drops=config["test_drops"],
+        ev_idx=config["ev_idx"],
         batch_size=config["batch_size"] // ngpus_per_node,
-        max_padding=config["max_padding"],
-        is_distributed=is_distributed,
+        #max_padding=config["max_padding"],
+        #is_distributed=is_distributed,
     )
 
     optimizer = torch.optim.Adam(
@@ -1673,39 +1842,41 @@ def train_worker(
             valid_dataloader.sampler.set_epoch(epoch)
 
         model.train()
-        print(f"[GPU{gpu}] Epoch {epoch} Training ====", flush=True)
+        print(f"[CPU] Epoch {epoch} Training ====" if gpu == "cpu" else f"[GPU{gpu}] Epoch {epoch} Training ====", flush=True)
         _, train_state = run_epoch(
-            (Batch(b[0], b[1], pad_idx) for b in train_dataloader),
+            (b for b in train_dataloader),
             model,
-            SimpleLossCompute(module.generator, criterion),
+            nn.MSELoss(),
             optimizer,
             lr_scheduler,
             mode="train+log",
             accum_iter=config["accum_iter"],
             train_state=train_state,
+            device=gpu,
         )
 
         GPUtil.showUtilization()
         if is_main_process:
-            file_path = "%s%.2d.pt" % (config["file_prefix"], epoch)
+            file_path = "%s%.3f_%.2d.pt" % (config["file_prefix"], config["compress_ratio"], epoch)
             torch.save(module.state_dict(), file_path)
         torch.cuda.empty_cache()
 
-        print(f"[GPU{gpu}] Epoch {epoch} Validation ====", flush=True)
+        print(f"[CPU] Epoch {epoch} Validation ====" if gpu == "cpu" else f"[GPU{gpu}] Epoch {epoch} Validation ====", flush=True)
         model.eval()
-        sloss = run_epoch(
-            (Batch(b[0], b[1], pad_idx) for b in valid_dataloader),
+        sloss, _ = run_epoch(
+            (b for b in valid_dataloader),
             model,
-            SimpleLossCompute(module.generator, criterion),
+            SGCSLoss(),
             DummyOptimizer(),
             DummyScheduler(),
             mode="eval",
+            device=gpu,
         )
         print(sloss)
         torch.cuda.empty_cache()
 
     if is_main_process:
-        file_path = "%sfinal.pt" % config["file_prefix"]
+        file_path = final_model_name(config)
         torch.save(module.state_dict(), file_path)
 
 
@@ -1725,34 +1896,45 @@ def train_distributed_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
     )
 
 
-def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
+def train_model(config):
     if config["distributed"]:
         train_distributed_model(
-            vocab_src, vocab_tgt, spacy_de, spacy_en, config
+            config
         )
     else:
         train_worker(
-            0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False
+            config["device"], 1, config, False
         )
 
 
 def load_trained_model():
+    global config
     config = {
-        "batch_size": 32,
+        "device": "cpu",
+        "batch_size": 30,
         "distributed": False,
         "num_epochs": 8,
         "accum_iter": 10,
         "base_lr": 1.0,
         "max_padding": 72,
         "warmup": 3000,
-        "file_prefix": "multi30k_model_",
+        "file_prefix": "umi_fc_ant1_crs1_model_",
+        "sls_config": "umi_fc_ant1_crs1_etypeII.json",
+        "sls_path": "/home/yzhu/Workspace/xg-simulator",
+        "train_drops": 20,
+        "test_drops": 2,
+        "ev_idx": 0,
+        "ns": 13,
+        "nt": 32,
+        "compress_ratio": 4/32,
     }
-    model_path = "multi30k_model_final.pt"
+    model_path = final_model_name(config)
     if not exists(model_path):
-        train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config)
+        train_model(config)
 
-    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.load_state_dict(torch.load("multi30k_model_final.pt"))
+    ns, nt, compress_ratio = config["ns"], config["nt"], config["compress_ratio"]
+    model = make_model(ns, nt, compress_ratio)
+    model.load_state_dict(torch.load(model_path))
     return model
 
 
@@ -1902,35 +2084,44 @@ def check_outputs(
     return results
 
 
-def run_model_example(n_examples=5):
-    global vocab_src, vocab_tgt, spacy_de, spacy_en
+def run_model_example():
+    #global vocab_src, vocab_tgt, spacy_de, spacy_en
+    global config
 
     print("Preparing Data ...")
     _, valid_dataloader = create_dataloaders(
         torch.device("cpu"),
-        vocab_src,
-        vocab_tgt,
-        spacy_de,
-        spacy_en,
+        #vocab_src,
+        #vocab_tgt,
+        #spacy_de,
+        #spacy_en,
+        sls_config=config["sls_config"],
+        sls_path=config["sls_path"],
+        train_drops=config["train_drops"],
+        test_drops=config["test_drops"],
+        ev_idx=config["ev_idx"],
         batch_size=1,
-        is_distributed=False,
+        #is_distributed=False,
     )
 
     print("Loading Trained Model ...")
 
-    model = make_model(len(vocab_src), len(vocab_tgt), N=6)
+    ns, nt, compress_ratio = config["ns"], config["nt"], config["compress_ratio"]
+    model = make_model(ns, nt, compress_ratio)
     model.load_state_dict(
-        torch.load("multi30k_model_final.pt", map_location=torch.device("cpu"))
+        torch.load(final_model_name(config), map_location=torch.device("cpu"))
     )
 
     print("Checking Model Outputs:")
-    example_data = check_outputs(
-        valid_dataloader, model, vocab_src, vocab_tgt, n_examples=n_examples
+    batch = next(iter(valid_dataloader))
+    src_mask = torch.ones((1, 1, batch.shape[1]), device=torch.device("cpu"))
+    out = model.forward(
+        batch, src_mask
     )
-    return model, example_data
+    return model, batch, out
 
 
-# execute_example(run_model_example)
+execute_example(run_model_example)
 
 
 # %% [markdown] id="0ZkkNTKLTsqO"
@@ -1949,10 +2140,10 @@ def mtx2df(m, max_row, max_col, row_tokens, col_tokens):
                 r,
                 c,
                 float(m[r, c]),
-                "%.3d %s"
-                % (r, row_tokens[r] if len(row_tokens) > r else "<blank>"),
-                "%.3d %s"
-                % (c, col_tokens[c] if len(col_tokens) > c else "<blank>"),
+                "%.3d"
+                % r,
+                "%.3d"
+                % c,
             )
             for r in range(m.shape[0])
             for c in range(m.shape[1])
@@ -2007,8 +2198,8 @@ def visualize_layer(model, layer, getter_fn, ntokens, row_tokens, col_tokens):
             attn,
             0,
             h,
-            row_tokens=row_tokens,
-            col_tokens=col_tokens,
+            row_tokens=list(range(len(row_tokens))),
+            col_tokens=list(range(len(col_tokens))),
             max_dim=ntokens,
         )
         for h in range(n_heads)
@@ -2032,14 +2223,14 @@ def visualize_layer(model, layer, getter_fn, ntokens, row_tokens, col_tokens):
 
 # %% tags=[]
 def viz_encoder_self():
-    model, example_data = run_model_example(n_examples=1)
+    model, example_in, example_data = run_model_example()
     example = example_data[
         len(example_data) - 1
     ]  # batch object for the final example
 
     layer_viz = [
         visualize_layer(
-            model, layer, get_encoder, len(example[1]), example[1], example[1]
+            model, layer, get_encoder, len(example), example, example
         )
         for layer in range(6)
     ]
@@ -2061,7 +2252,7 @@ show_example(viz_encoder_self)
 
 # %% tags=[]
 def viz_decoder_self():
-    model, example_data = run_model_example(n_examples=1)
+    model, example_in, example_data = run_model_example()
     example = example_data[len(example_data) - 1]
 
     layer_viz = [
@@ -2069,9 +2260,9 @@ def viz_decoder_self():
             model,
             layer,
             get_decoder_self,
-            len(example[1]),
-            example[1],
-            example[1],
+            len(example),
+            example,
+            example,
         )
         for layer in range(6)
     ]
@@ -2093,7 +2284,7 @@ show_example(viz_decoder_self)
 
 # %% tags=[]
 def viz_decoder_src():
-    model, example_data = run_model_example(n_examples=1)
+    model, example_in, example_data = run_model_example()
     example = example_data[len(example_data) - 1]
 
     layer_viz = [
@@ -2117,7 +2308,7 @@ def viz_decoder_src():
     )
 
 
-show_example(viz_decoder_src)
+#show_example(viz_decoder_src)
 
 # %% [markdown] id="nSseuCcATsqO"
 # # Conclusion
