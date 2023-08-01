@@ -1623,13 +1623,17 @@ def train_worker(
     config,
     is_distributed=False,
 ):
-    print(f"Train worker process using GPU: {gpu} for training", flush=True)
-    torch.cuda.set_device(gpu)
+    if gpu == "cpu":
+        print("Train worker process using CPU for training")
+    else:
+        print(f"Train worker process using GPU: {gpu} for training", flush=True)
+        torch.cuda.set_device(gpu)
 
     pad_idx = vocab_tgt["<blank>"]
     d_model = 512
     model = make_model(len(vocab_src), len(vocab_tgt), N=6)
-    model.cuda(gpu)
+    if gpu != "cpu":
+        model.cuda(gpu)
     module = model
     is_main_process = True
     if is_distributed:
@@ -1673,7 +1677,7 @@ def train_worker(
             valid_dataloader.sampler.set_epoch(epoch)
 
         model.train()
-        print(f"[GPU{gpu}] Epoch {epoch} Training ====", flush=True)
+        print(f"[CPU] Epoch {epoch} Training ====" if gpu == "cpu" else f"[GPU{gpu}] Epoch {epoch} Training ====", flush=True)
         _, train_state = run_epoch(
             (Batch(b[0], b[1], pad_idx) for b in train_dataloader),
             model,
@@ -1691,7 +1695,7 @@ def train_worker(
             torch.save(module.state_dict(), file_path)
         torch.cuda.empty_cache()
 
-        print(f"[GPU{gpu}] Epoch {epoch} Validation ====", flush=True)
+        print(f"[CPU] Epoch {epoch} Validation ====" if gpu == "cpu" else f"[GPU{gpu}] Epoch {epoch} Validation ====", flush=True)
         model.eval()
         sloss = run_epoch(
             (Batch(b[0], b[1], pad_idx) for b in valid_dataloader),
@@ -1732,12 +1736,13 @@ def train_model(vocab_src, vocab_tgt, spacy_de, spacy_en, config):
         )
     else:
         train_worker(
-            0, 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False
+            config["device"], 1, vocab_src, vocab_tgt, spacy_de, spacy_en, config, False
         )
 
 
 def load_trained_model():
     config = {
+        "device": "cpu",
         "batch_size": 32,
         "distributed": False,
         "num_epochs": 8,
