@@ -29,11 +29,11 @@ class EigenVecDataset(Dataset):
         self.config_file = os.path.join(self.config_file, config_filename)
         with open(self.config_file, 'r') as config_file:
             config_data = json.load(config_file)
-            self.numUEs = config_data['layout']['macroSites'] * config_data['layout']['sectorPerSite'] * config_data['layout']['uePerSector']
+            self.numUEs = config_data['layout']['numOfUEs']
             self.antPerPanel = config_data['bsAntennaParams']['m'] * config_data['bsAntennaParams']['n'] * config_data['bsAntennaParams']['p']
         self.transform = transform
         config_filesplit = os.path.splitext(config_filename)
-        cache_name = "{}_{}.pt".format(config_filesplit[0], repetition, config_filesplit[1])
+        cache_name = "{}_{}.pt".format(config_filesplit[0], repetition)
         if exists(cache_name):
             self.eigen_buffer = torch.load(cache_name)
             return
