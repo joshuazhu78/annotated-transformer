@@ -40,13 +40,15 @@ class EigenVecDataset(Dataset):
         lib = cdll.LoadLibrary(os.path.join(simulator_dir, 'build/_output/chanexp.so'))
         f = self.config_file.encode('utf-8')
         b = go_string(c_char_p(f), len(f))
+        lib.getNumOfPrecodingSBs.restype = c_int
+        numOfPrecodingSBs = lib.getNumOfPrecodingSBs(b)
         lib.chanexp.restype = c_char_p
-        EigenFloats = c_float * (2 * self.antPerPanel) * 13 * 2 * self.numUEs
+        EigenFloats = c_float * (2 * self.antPerPanel) * numOfPrecodingSBs * 2 * self.numUEs
         EigenBuffer = EigenFloats()
-        self.eigen_buffer = np.zeros((self.numUEs*repetition, 2, 13, self.antPerPanel*2), dtype=np.float32)
+        self.eigen_buffer = np.zeros((self.numUEs*repetition, 2, numOfPrecodingSBs, self.antPerPanel*2), dtype=np.float32)
         for i in range(repetition):
             lib.chanexp(b, EigenBuffer)
-            eigen_buffer = np.ctypeslib.as_array(EigenBuffer, (self.numUEs, 2, 13, self.antPerPanel*2))
+            eigen_buffer = np.ctypeslib.as_array(EigenBuffer, (self.numUEs, 2, numOfPrecodingSBs, self.antPerPanel*2))
             self.eigen_buffer[i*self.numUEs:(i+1)*self.numUEs,:] = eigen_buffer
         self.eigen_buffer = torch.from_numpy(self.eigen_buffer)
         if not exists(cache_name):
