@@ -14,7 +14,7 @@ class go_string(Structure):
 class ComChanDataset(Dataset):
     """Composite channel dataset."""
 
-    def __init__(self, config_filename, simulator_dir, train_drops, test_drops, train, test_from_train, transform=None):
+    def __init__(self, config_filename, simulator_dir, train_drops, test_drops, test_from_train, train, transform=None):
         """
         Arguments:
             config_filename (string): Name of the json config file for xg-simulator.
@@ -29,11 +29,11 @@ class ComChanDataset(Dataset):
         self.config_file = os.path.join(self.config_file, config_filename)
         with open(self.config_file, 'r') as config_file:
             config_data = json.load(config_file)
-            #self.scenario = config_data['layout']['scenario']
+            self.numOfUEs = config_data['layout']['numOfUEs']
         self.transform = transform
         numOfChans = train_drops + test_drops
         config_filesplit = os.path.splitext(config_filename)
-        cache_name = "{}_hcom_{}.pt".format(config_filesplit[0], numOfChans)
+        cache_name = "{}_hcom_{}_{}.pt".format(config_filesplit[0], self.numOfUEs, numOfChans)
         if exists(cache_name):
             h_buffer, n_buffer = torch.load(cache_name)
             if train:
