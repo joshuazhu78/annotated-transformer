@@ -5,6 +5,7 @@ import json
 from os.path import exists
 from torch.utils.data import Dataset
 from ctypes import *
+from utils import readConfig
 
 class go_string(Structure):
     _fields_ = [
@@ -25,12 +26,11 @@ class EigenVecDataset(Dataset):
                 on a sample.
         """
         self.ev_idx = ev_idx
-        self.config_file = os.path.join(simulator_dir, "configs")
-        self.config_file = os.path.join(self.config_file, config_filename)
-        with open(self.config_file, 'r') as config_file:
-            config_data = json.load(config_file)
-            self.numUEs = config_data['layout']['numOfUEs']
-            self.antPerPanel = config_data['bsAntennaParams']['m'] * config_data['bsAntennaParams']['n'] * config_data['bsAntennaParams']['p']
+        self.config_file, config_data = readConfig(simulator_dir, config_filename)
+        self.numUEs = config_data['layout']['numOfUEs']
+        self.antPerPanel = config_data['bsAntennaParams']['m'] * config_data['bsAntennaParams']['n'] * config_data['bsAntennaParams']['p']
+        self.ueAntPerPanel = config_data['utAntennaParams']['m']* config_data['utAntennaParams']['n'] * config_data['utAntennaParams']['p']
+        self.maxRank = min(self.antPerPanel, self.ueAntPerPanel)
         self.transform = transform
         config_filesplit = os.path.splitext(config_filename)
         cache_name = "{}_{}.pt".format(config_filesplit[0], repetition)
@@ -43,12 +43,12 @@ class EigenVecDataset(Dataset):
         lib.getNumOfPrecodingSBs.restype = c_int
         numOfPrecodingSBs = lib.getNumOfPrecodingSBs(b)
         lib.chanexp.restype = c_char_p
-        EigenFloats = c_float * (2 * self.antPerPanel) * numOfPrecodingSBs * 2 * self.numUEs
+        EigenFloats = c_float * (2 * self.antPerPanel) * numOfPrecodingSBs * self.maxRank * self.numUEs
         EigenBuffer = EigenFloats()
-        self.eigen_buffer = np.zeros((self.numUEs*repetition, 2, numOfPrecodingSBs, self.antPerPanel*2), dtype=np.float32)
+        self.eigen_buffer = np.zeros((self.numUEs*repetition, self.maxRank, numOfPrecodingSBs, self.antPerPanel*2), dtype=np.float32)
         for i in range(repetition):
             lib.chanexp(b, EigenBuffer)
-            eigen_buffer = np.ctypeslib.as_array(EigenBuffer, (self.numUEs, 2, numOfPrecodingSBs, self.antPerPanel*2))
+            eigen_buffer = np.ctypeslib.as_array(EigenBuffer, (self.numUEs, self.maxRank, numOfPrecodingSBs, self.antPerPanel*2))
             self.eigen_buffer[i*self.numUEs:(i+1)*self.numUEs,:] = eigen_buffer
         self.eigen_buffer = torch.from_numpy(self.eigen_buffer)
         if not exists(cache_name):
