@@ -5,6 +5,7 @@ import json
 from os.path import exists
 from torch.utils.data import Dataset
 from ctypes import *
+from utils import readConfig
 
 class go_string(Structure):
     _fields_ = [
@@ -25,11 +26,8 @@ class ComChanDataset(Dataset):
             transform (callable, optional): Optional transform to be applied
                 on a sample.
         """
-        self.config_file = os.path.join(simulator_dir, "configs")
-        self.config_file = os.path.join(self.config_file, config_filename)
-        with open(self.config_file, 'r') as config_file:
-            config_data = json.load(config_file)
-            self.numOfUEs = config_data['layout']['numOfUEs']
+        self.config_file, config_data = readConfig(simulator_dir, config_filename)
+        self.numOfUEs = config_data['layout']['numOfUEs']
         self.transform = transform
         numOfChans = train_drops + test_drops
         config_filesplit = os.path.splitext(config_filename)
