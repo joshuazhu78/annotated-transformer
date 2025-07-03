@@ -1,5 +1,6 @@
 import os
 import json
+import subprocess
 
 def readConfig(simulator_dir, config_filename):
     """
@@ -16,3 +17,21 @@ def readConfig(simulator_dir, config_filename):
         config_data = json.load(f)
 
     return config_file, config_data
+
+def get_gpu_count_nvidia_smi():
+    try:
+        # Execute nvidia-smi command to list GPUs
+        output = subprocess.check_output("nvidia-smi -L", shell=True).decode("ascii")
+        # Count the lines in the output, each representing a GPU
+        gpu_count = len(output.strip().split('\n'))
+        return gpu_count
+    except FileNotFoundError:
+        print("nvidia-smi not found. Ensure NVIDIA drivers are installed.")
+        return 0
+    except Exception as e:
+        print(f"Error getting GPU count with nvidia-smi: {e}")
+        return 0
+
+# Example usage
+num_gpus = get_gpu_count_nvidia_smi()
+print(f"Number of GPUs detected: {num_gpus}")
