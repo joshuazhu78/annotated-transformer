@@ -31,7 +31,7 @@ class ComChanDataset(Dataset):
         self.transform = transform
         numOfChans = train_drops + test_drops
         config_filesplit = os.path.splitext(config_filename)
-        cache_name = "{}_hcom_{}_{}.pt".format(config_filesplit[0], self.numOfUEs, numOfChans)
+        cache_name = "{}_{}_{}.pt".format(config_filesplit[0], self.numOfUEs, numOfChans)
         if exists(cache_name):
             h_buffer, n_buffer = torch.load(cache_name)
             if train:
